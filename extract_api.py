@@ -1,14 +1,15 @@
 import requests
 import xml.etree.ElementTree as ET
-from typing import Dict, Tuple
 import sqlite3
 from pathlib import Path
 import sys
 from shutil import rmtree
+import time
 from itertools import dropwhile
 import json
 
 # A semester is a combination of term + year
+# yes, you can safely import this python file to use the `decode_semester` and `encode_semester` functions
 
 TERMS = ['spring', 'summer', 'fall', 'winter']
 API_URL = "https://courses.illinois.edu/cisapp/explorer/schedule/"
@@ -18,7 +19,7 @@ epoch_term = ('fall', 2004)
 
 LIMIT_SEMS = 0
 
-# encode and decode semester because i'm lazy and don't want to deal with aggregate keys
+# encode and decode semester because i'm lazy and this is simpler to store in a database
 
 def encode_semester(term, year):
     return (int(year) - epoch_term[1]) * 4 + TERMS.index(term) - 2
@@ -76,6 +77,7 @@ def data_layer_init():
     Path('./outputs').mkdir(exist_ok=True)
     con = sqlite3.connect('./outputs/offerings.db')
     cur = con.cursor()
+    # enc_term is a misnomer, sorry; it's actually the encoded "semester" because you can extract the year
     cur.execute("CREATE TABLE IF NOT EXISTS offerings(enc_term integer, subj text, course text)")
     return con, cur
 
@@ -103,7 +105,6 @@ def data_layer_dump_to_json(cur, output_path):
         return json.dump(output, fp=of)
 
 # functions to handle process crashing
-
 def remove_bookmark():
     Path('./runtime/bookmark.txt').unlink()
 
@@ -122,18 +123,16 @@ def get_bookmark():
 
 def full_exec():
     con, cur = data_layer_init()
-    
     bookmarked_state, enc_starting_term, starting_subj = get_bookmark()
     if not bookmarked_state:
         enc_starting_term = encode_semester(*get_starting_semester())
     else:
         print("bookmark found at semester:", decode_semester(enc_starting_term), starting_subj)
-
     if LIMIT_SEMS > 0:
-        term_stop = enc_starting_term - LIMIT_SEMS
+        semester_stop = enc_starting_term - LIMIT_SEMS
     else:
-        term_stop = -1
-    for enc_sem in range(enc_starting_term, term_stop, -1):
+        semester_stop = -1 # include semester=0
+    for enc_sem in range(enc_starting_term, semester_stop, -1):
         term, year = decode_semester(enc_sem)
         xml_with_subj = get_sem_xml(*decode_semester(enc_sem))
         if not xml_with_subj:
@@ -150,20 +149,24 @@ def full_exec():
                 print(term, year, subj, course)
                 data_layer_dump(cur, term, year, subj, course) # write to sqlite db
             data_layer_commit(con) # commit
-    remove_bookmark() # we are done so remove the bookmark
+    remove_bookmark() # we are done calling the API, don't need this anymore
 
-if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] in ('-f', '-get'):
-        if sys.argv[1] == '-f':
-            print("removing existing products")
+if __name__ == '__main__': 
+    if len(sys.argv) > 1 and set(('-f', '-get')).intersection(set(sys.argv)):
+        if '-f' in sys.argv[1:]:
+            print("removing existing runtime products, CTRL+C in 5 seconds if you don't want to remove it!")
+            time.sleep(5)
             for directory in DIRECTORIES:
                 rmtree(directory)
         full_exec()
+
+    # printing data to show how you can extract the terms
     con, cur = data_layer_init()
-    # just some debug data printing
     for i, x in enumerate(data_layer_yield(cur)):
-        print(x)
-        if i > 30:
+        term, year = decode_semester(list(x[2])[0])
+        print(x[0], f"{x[1]}:", "First offered:", term, "of", year) 
+        if i > 10:
             break
-    data_layer_dump_to_json(cur, './outputs/offerings.json')
-        
+
+    if '-json' in sys.argv:
+        data_layer_dump_to_json(cur, './outputs/offerings.json')
